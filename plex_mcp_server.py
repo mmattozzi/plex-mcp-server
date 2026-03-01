@@ -325,12 +325,13 @@ def create_streamable_http_app(mcp_server: Server, debug: bool = False):
         stateless=False,
     )
 
-    async def handle_streamable_http(request: Request) -> None:
+    async def handle_streamable_http(request: Request) -> Response:
         await session_manager.handle_request(
             request.scope,
             request.receive,
             request._send,  # noqa: SLF001
         )
+        return Response()
 
     @contextlib.asynccontextmanager
     async def lifespan(app) -> AsyncIterator[None]:
