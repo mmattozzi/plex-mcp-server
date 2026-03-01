@@ -215,30 +215,67 @@ async def handle_authorization_server_metadata(request: Request):
         return JSONResponse({"error": f"Failed to connect to Authentik: {str(e)}"}, status_code=502)
 
 
-def create_starlette_app(mcp_server: Server, debug: bool = False):
-    """Create a Starlette application that can serve the provided mcp server with SSE."""
-    sse = SseServerTransport("/messages/")
-
-    async def handle_sse(request: Request) -> None:
-        async with sse.connect_sse(
-            request.scope,
-            request.receive,
-            request._send,  # noqa: SLF001
-        ) as (read_stream, write_stream):
-            await mcp_server.run(
-                read_stream,
-                write_stream,
-                mcp_server.create_initialization_options(),
-            )
-        return Response()
-
-    # Build routes
-    routes = [
-        Route("/sse", endpoint=handle_sse),
-        Mount("/messages/", app=sse.handle_post_message),
-    ]
-
+class ASGIHandler:
+    """Wrapper to make an ASGI-compatible callable appear as a non-routine to Starlette.
     
+    This bypasses Starlette's request_response wrapper, allowing the transport to 
+    handle the full ASGI lifecycle (including sending response headers) directly.
+    """
+    def __init__(self, asgi_app):
+        self.asgi_app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        await self.asgi_app(scope, receive, send)
+
+
+def create_starlette_app(mcp_server: Server, transport: str = "sse", debug: bool = False):
+    """Create a Starlette application that can serve the provided mcp server.
+    
+    Args:
+        mcp_server: The MCP server instance.
+        transport: Either 'sse' or 'streamable-http'.
+        debug: Whether to enable debug mode.
+    """
+    import contextlib
+    from collections.abc import AsyncIterator
+
+    routes = []
+    lifespan = None
+
+    if transport == "sse":
+        sse = SseServerTransport("/messages/")
+
+        async def handle_sse(scope, receive, send):
+            async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
+                await mcp_server.run(
+                    read_stream,
+                    write_stream,
+                    mcp_server.create_initialization_options(),
+                )
+
+        routes.extend([
+            Route("/sse", endpoint=ASGIHandler(handle_sse)),
+            Mount("/messages/", app=sse.handle_post_message),
+        ])
+    
+    elif transport == "streamable-http":
+        session_manager = StreamableHTTPSessionManager(
+            app=mcp_server,
+            json_response=False,
+            stateless=False,
+        )
+
+        async def handle_streamable_http(scope, receive, send):
+            await session_manager.handle_request(scope, receive, send)
+
+        @contextlib.asynccontextmanager
+        async def streamable_lifespan(app) -> AsyncIterator[None]:
+            async with session_manager.run():
+                yield
+        
+        lifespan = streamable_lifespan
+        routes.append(Route("/mcp", endpoint=ASGIHandler(handle_streamable_http), methods=["GET", "POST", "DELETE"]))
+
     # Add OAuth discovery endpoints if enabled
     if oauth_config.enabled:
         async def handle_authorize_redirect(request: Request):
@@ -311,48 +348,6 @@ def create_starlette_app(mcp_server: Server, debug: bool = False):
         debug=debug,
         routes=routes,
         middleware=middleware,
-    )
-
-
-def create_streamable_http_app(mcp_server: Server, debug: bool = False):
-    """Create a Starlette application that serves the MCP server with Streamable HTTP transport."""
-    import contextlib
-    from collections.abc import AsyncIterator
-
-    session_manager = StreamableHTTPSessionManager(
-        app=mcp_server,
-        json_response=False,
-        stateless=False,
-    )
-
-    async def handle_streamable_http(request: Request) -> Response:
-        await session_manager.handle_request(
-            request.scope,
-            request.receive,
-            request._send,  # noqa: SLF001
-        )
-        return Response()
-
-    @contextlib.asynccontextmanager
-    async def lifespan(app) -> AsyncIterator[None]:
-        async with session_manager.run():
-            yield
-
-    # Build routes - streamable HTTP uses a single /mcp endpoint
-    routes = [
-        Route("/mcp", endpoint=handle_streamable_http, methods=["GET", "POST", "DELETE"]),
-    ]
-
-    # Build middleware stack
-    middleware = []
-
-    if oauth_config.enabled:
-        middleware.append(Middleware(OAuthMiddleware))
-
-    return Starlette(
-        debug=debug,
-        routes=routes,
-        middleware=middleware,
         lifespan=lifespan,
     )
 
@@ -420,19 +415,16 @@ def main():
     if args.transport == 'stdio':
         # Run with stdio transport (original method)
         mcp.run(transport='stdio')
-    elif args.transport == 'streamable-http':
-        # Run with Streamable HTTP transport
-        mcp_server = mcp._mcp_server  # Access the underlying MCP server
-        starlette_app = create_streamable_http_app(mcp_server, debug=args.debug)
-        print(f"Starting Streamable HTTP server on http://{args.host}:{args.port}")
-        print("Access the Streamable HTTP endpoint at /mcp")
-        uvicorn.run(starlette_app, host=args.host, port=args.port)
     else:
-        # Run with SSE transport
+        # Run with Starlette-based transport (SSE or Streamable HTTP)
         mcp_server = mcp._mcp_server  # Access the underlying MCP server
-        starlette_app = create_starlette_app(mcp_server, debug=args.debug)
-        print(f"Starting SSE server on http://{args.host}:{args.port}")
-        print("Access the SSE endpoint at /sse")
+        starlette_app = create_starlette_app(mcp_server, transport=args.transport, debug=args.debug)
+        
+        transport_name = "Streamable HTTP" if args.transport == "streamable-http" else "SSE"
+        endpoint = "/mcp" if args.transport == "streamable-http" else "/sse"
+        
+        print(f"Starting {transport_name} server on http://{args.host}:{args.port}")
+        print(f"Access the endpoint at {endpoint}")
         uvicorn.run(starlette_app, host=args.host, port=args.port)
 
 if __name__ == "__main__":
