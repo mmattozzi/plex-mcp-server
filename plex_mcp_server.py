@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse, Response, RedirectResponse # type:
 from starlette.middleware import Middleware # type: ignore
 from mcp.server import Server # type: ignore
 from mcp.server.sse import SseServerTransport # type: ignore
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager # type: ignore
 from starlette.requests import Request # type: ignore
 from dotenv import load_dotenv # type: ignore
 
@@ -236,6 +237,7 @@ def create_starlette_app(mcp_server: Server, debug: bool = False):
         Route("/sse", endpoint=handle_sse),
         Mount("/messages/", app=sse.handle_post_message),
     ]
+
     
     # Add OAuth discovery endpoints if enabled
     if oauth_config.enabled:
@@ -311,6 +313,48 @@ def create_starlette_app(mcp_server: Server, debug: bool = False):
         middleware=middleware,
     )
 
+
+def create_streamable_http_app(mcp_server: Server, debug: bool = False):
+    """Create a Starlette application that serves the MCP server with Streamable HTTP transport."""
+    import contextlib
+    from collections.abc import AsyncIterator
+
+    session_manager = StreamableHTTPSessionManager(
+        app=mcp_server,
+        json_response=False,
+        stateless=False,
+    )
+
+    async def handle_streamable_http(request: Request) -> None:
+        await session_manager.handle_request(
+            request.scope,
+            request.receive,
+            request._send,  # noqa: SLF001
+        )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app) -> AsyncIterator[None]:
+        async with session_manager.run():
+            yield
+
+    # Build routes - streamable HTTP uses a single /mcp endpoint
+    routes = [
+        Route("/mcp", endpoint=handle_streamable_http, methods=["GET", "POST", "DELETE"]),
+    ]
+
+    # Build middleware stack
+    middleware = []
+
+    if oauth_config.enabled:
+        middleware.append(Middleware(OAuthMiddleware))
+
+    return Starlette(
+        debug=debug,
+        routes=routes,
+        middleware=middleware,
+        lifespan=lifespan,
+    )
+
 def main():
     """Main entry point for the Plex MCP Server."""
     if env_loaded:
@@ -318,8 +362,8 @@ def main():
     
     # Setup command line arguments
     parser = argparse.ArgumentParser(description='Run Plex MCP Server')
-    parser.add_argument('--transport', choices=['stdio', 'sse'], default='sse',
-                        help='Transport method to use (stdio or sse)')
+    parser.add_argument('--transport', choices=['stdio', 'sse', 'streamable-http'], default='sse',
+                        help='Transport method to use (stdio, sse, or streamable-http)')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to (for SSE)')
     parser.add_argument('--port', type=int, default=3001, help='Port to listen on (for SSE)')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
@@ -375,6 +419,13 @@ def main():
     if args.transport == 'stdio':
         # Run with stdio transport (original method)
         mcp.run(transport='stdio')
+    elif args.transport == 'streamable-http':
+        # Run with Streamable HTTP transport
+        mcp_server = mcp._mcp_server  # Access the underlying MCP server
+        starlette_app = create_streamable_http_app(mcp_server, debug=args.debug)
+        print(f"Starting Streamable HTTP server on http://{args.host}:{args.port}")
+        print("Access the Streamable HTTP endpoint at /mcp")
+        uvicorn.run(starlette_app, host=args.host, port=args.port)
     else:
         # Run with SSE transport
         mcp_server = mcp._mcp_server  # Access the underlying MCP server

@@ -5,7 +5,7 @@ A powerful Model-Context-Protocol (MCP) server for interacting with Plex Media S
 ## Features
 
 - **Standardized API**: Unified JSON responses for all Plex operations.
-- **Multiple Transports**: Supports both `stdio` and `SSE` (Server-Sent Events).
+- **Multiple Transports**: Supports `stdio`, `SSE` (Server-Sent Events), and `streamable-http`.
 - **Comprehensive Control**: Manage libraries, media, collections, playlists, clients, and users.
 - **Remote Ready**: Built-in OAuth 2.1 support for integration with remote AI platforms like Claude.ai.
 - **Admin Tools**: Access logs, monitor bandwidth, and run Butler tasks.
@@ -82,7 +82,7 @@ Example for Claude Desktop (`%APPDATA%/Claude/claude_desktop_config.json`):
 
 Go to https://claude.ai/settings/connectors and add a new connector with the following settings:
 - Name: Plex MCP
-- URL: https://plexmcp.example.com/sse
+- URL: `https://plexmcp.example.com/sse` (for SSE) or `https://plexmcp.example.com/mcp` (for Streamable HTTP)
 - Add OAuth Client ID and Client Secret if OAuth is enabled
 
 <img width="516" height="515" alt="image" src="https://github.com/user-attachments/assets/7949a127-51a7-4c60-a121-511ee4a1f00d" />
@@ -193,9 +193,15 @@ Control playback and navigation on Plex clients.
 | `client_navigate` | Send remote control navigation commands. | `client_name`, `command`, `client_id` |
 | `client_set_streams` | Changes audio or subtitle tracks. | `client_name`, `audio_stream_id`, `subtitle_stream_id`, `client_id` |
 
-## Remote Access & OAuth
+The Plex MCP Server can be integrated with remote platforms like **Claude.ai** via SSE, **Streamable HTTP**, or stdio. This allows you to talk to your MCP server directly from the Claude interface from anywhere.
 
-The Plex MCP Server can be integrated with remote platforms like **Claude.ai** via SSE and optional OAuth 2.1. This allows you to talk to your MCP server directly from the Claude interface from anywhere.
+### Transport Options
+
+| Transport | CLI Argument | Endpoint / Mode | Use Case |
+|-----------|--------------|-----------------|----------|
+| **stdio** | `--transport stdio` | Standard Input/Output | Local use (Claude Desktop) |
+| **SSE** | `--transport sse` | `/sse` | Remote use, web platforms |
+| **Streamable HTTP** | `--transport streamable-http` | `/mcp` | Modern, efficient unified HTTP transport |
 
 ### Enabling OAuth
 1. Set `MCP_OAUTH_ENABLED=true` in your environment.
